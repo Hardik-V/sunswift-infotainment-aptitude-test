@@ -31,7 +31,7 @@
 
   { "timestamp": 1741946415000, "speed": 72.2, "battery": 71.9, "motorTemp": "72C", "gps": { "lat": -33.9185, "lng": 151.2325 } },
 
-  { "timestamp": 1741946416000, "speed": 71.7, "battery": null, "motorTemp": 72.8, "gps": { "lat": -33.9186, "lng": 151.2326 } },
+  { "timestamp": 1741946416000, "speed": 1.7, "battery": null, "motorTemp": 72.8, "gps": { "lat": -33.9186, "lng": 151.2326 } },
 
   { "timestamp": 1741946417000, "speed": 71.0, "battery": 71.6, "motorTemp": 73.5, "gps": null },
 
