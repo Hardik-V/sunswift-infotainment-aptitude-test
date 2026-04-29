@@ -45,17 +45,20 @@ export default function TelemetryDashboard() {
   const handleMouseLeave = useCallback(() => setActiveIndex(null), []);
 
   // Calculate deltas to see how much our interpolation shifted the raw values
-  const speedDelta = (displayData.rawSpeedNum !== null) 
+  const isSpeedInvalid = displayData.rawSpeedNum === null || isNaN(displayData.rawSpeedNum);
+  const speedDelta = !isSpeedInvalid 
     ? Math.abs(displayData.rawSpeedNum - displayData.speed).toFixed(2) 
-    : "0.00";
-
-  const batteryDelta = (displayData.rawBatteryDisplay !== null) 
-    ? Math.abs(displayData.rawBatteryDisplay - displayData.battery).toFixed(2) 
-    : "0.00";
+    : "ERR"; // Mark it as an error/missing if it's NaN
   
-  const tempDelta = (displayData.rawMotorTempDisplay !== null) 
-    ? Math.abs(displayData.rawMotorTempDisplay - displayData.motorTemp).toFixed(2) 
-    : "0.00";
+  const isBatteryInvalid = displayData.rawBatteryDisplay === null || isNaN(parseFloat(displayData.rawBatteryDisplay));
+  const batteryDelta = !isBatteryInvalid
+    ? Math.abs(parseFloat(displayData.rawBatteryDisplay) - displayData.battery).toFixed(2)
+    : "ERR";
+  
+  const isTempInvalid = displayData.rawMotorTempDisplay === null || isNaN(parseFloat(displayData.rawMotorTempDisplay));
+  const tempDelta = !isTempInvalid
+    ? Math.abs(parseFloat(displayData.rawMotorTempDisplay) - displayData.motorTemp).toFixed(2)
+    : "ERR";
 
   const isTempCritical = displayData.motorTemp !== null && displayData.motorTemp > 90;
 
@@ -103,7 +106,11 @@ export default function TelemetryDashboard() {
             {/* Alert pops in when Δ is detected across any sensor */}
             <div style={{
               ...styles.warningPill,
-              opacity: (parseFloat(speedDelta) !== 0 || parseFloat(batteryDelta) !== 0 || parseFloat(tempDelta) !== 0) ? 1 : 0,
+              opacity: (
+                speedDelta !== "0.00" || 
+                batteryDelta !== "0.00" || 
+                tempDelta !== "0.00"
+              ) ? 1 : 0,
             }}>
               ⚠ SENSOR ANOMALY DETECTED // DATA INTERPOLATED
             </div>
