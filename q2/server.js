@@ -1,9 +1,9 @@
 /**
  * I went with a strict "all-or-nothing" validation for the batch uploads, if one entry is 
  * junk, we reject the whole batch to avoid partial/corrupted data states in the engine logs.
- * Storage is kept in a simple in-memory array for speed, which fits the 30s-snippet 
- * requirement perfectly. For the summary, I used a single-pass reduction to calculate 
- * min/max/avg simultaneously to keep it O(n) and snappy even if the batch sizes grow.
+ * Storage is kept in a simple in-memory array for ease of implementation For the summary, 
+ * I used a single-pass reduction to calculate min/max/avg simultaneously to keep it snappy 
+ * even if the batch sizes grow.
  */
 
 const express = require('express');
