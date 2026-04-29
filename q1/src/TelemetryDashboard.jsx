@@ -1,368 +1,296 @@
-/*
- * TelemetryDashboard.jsx — Sunswift Infotainment Q1
- *
- * Approach: I first wrote a two-pass cleaning pipeline — pass one coerces every
- * field to the correct type (stripping units like "%" or "C", catching "NaN"
- * strings, nulling anything unparseable), then pass two detects outliers by
- * comparing each speed reading against its neighbours; values that deviate by
- * more than 20 km/h from the local average are treated as sensor glitches and
- * replaced with linear interpolation. I chose interpolation over removal so the
- * chart stays continuous and the timestamp axis remains uniform. For the display
- * I used a Recharts LineChart (clean API, no heavy dependency), and kept styling
- * intentionally minimal — a dark race-HUD palette with a single red alert for
- * motorTemp > 90 °C so critical warnings are impossible to miss at a glance.
- */
+import React, { useMemo, useState, useCallback } from "react";
+import { ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 
-import { useMemo } from "react";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  ReferenceLine,
-} from "recharts";
 import rawData from "./telemetry_sample.json";
+import { cleanTelemetry } from "./utils/telemetryParser";
+import PrecisionGauge from "./components/PrecisionGauge";
 
-// Data Cleaning
-
-/**
- * Coerce any value to a finite number, or return null.
- * Handles: numbers, numeric strings, strings with trailing units ("72C", "72.6%").
- */
-function toNumber(val) {
-  if (val === null || val === undefined) return null;
-  if (typeof val === "number") return isFinite(val) ? val : null;
-  if (typeof val === "string") {
-    if (val.trim().toLowerCase() === "nan") return null;
-    const stripped = val.replace(/[^0-9.-]/g, "");
-    const parsed = parseFloat(stripped);
-    return isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-/**
- * Validate a GPS object — must have finite lat and lng numbers.
- */
-function toGps(val) {
-  if (!val || typeof val !== "object") return null;
-  const lat = toNumber(val.lat);
-  const lng = toNumber(val.lng);
-  return lat !== null && lng !== null ? { lat, lng } : null;
-}
-
-/**
- * Linear interpolation between two numbers.
- */
-function lerp(a, b) {
-  return (a + b) / 2;
-}
-
-/**
- * Full two-pass cleaning pipeline.
- *
- * Pass 1 — type coercion: parse every field to its target type.
- * Pass 2 — outlier detection: for speed, if a value deviates more than
- *   OUTLIER_THRESHOLD km/h from the average of its neighbours it is flagged as
- *   a sensor glitch and replaced with the interpolated value.
- *
- * Outlier rationale:
- *   - speed = 40 surrounded by ~73 km/h values → clearly a momentary dropout,
- *     not a real deceleration (would require ~170 m/s² deceleration).
- *   - speed = 300 → physically impossible for Sunswift; treated identically.
- *   Both are replaced with the average of their neighbours so the chart stays
- *   continuous without introducing gaps in the time series.
- */
-const OUTLIER_THRESHOLD = 20; // km/h deviation from neighbour average
-const SPEED_MAX = 200;         // hard upper clamp as a safety net
-
-function cleanTelemetry(raw) {
-  // Pass 1: coerce types
-  const coerced = raw.map((entry) => ({
-    timestamp: entry.timestamp,
-    speed: toNumber(entry.speed),
-    battery: toNumber(entry.battery),
-    motorTemp: toNumber(entry.motorTemp),
-    gps: toGps(entry.gps),
-  }));
-
-  // Pass 2: outlier interpolation on speed
-  const cleaned = coerced.map((entry, i) => {
-    let speed = entry.speed;
-
-    // Hard clamp
-    if (speed !== null && speed > SPEED_MAX) speed = null;
-
-    // Outlier detection — needs valid neighbours
-    if (speed !== null && i > 0 && i < coerced.length - 1) {
-      const prev = coerced[i - 1].speed;
-      const next = coerced[i + 1].speed;
-      if (prev !== null && next !== null) {
-        const neighbourAvg = (prev + next) / 2;
-        if (Math.abs(speed - neighbourAvg) > OUTLIER_THRESHOLD) {
-          speed = null; // flag for interpolation below
-        }
-      }
-    }
-
-    return { ...entry, speed };
-  });
-
-  // Pass 2b: fill null speeds with linear interpolation
-  for (let i = 0; i < cleaned.length; i++) {
-    if (cleaned[i].speed === null) {
-      // Find nearest valid neighbours
-      let prevIdx = i - 1;
-      let nextIdx = i + 1;
-      while (prevIdx >= 0 && cleaned[prevIdx].speed === null) prevIdx--;
-      while (nextIdx < cleaned.length && cleaned[nextIdx].speed === null) nextIdx++;
-
-      const prevSpeed = prevIdx >= 0 ? cleaned[prevIdx].speed : null;
-      const nextSpeed = nextIdx < cleaned.length ? cleaned[nextIdx].speed : null;
-
-      if (prevSpeed !== null && nextSpeed !== null) {
-        cleaned[i].speed = lerp(prevSpeed, nextSpeed);
-      } else if (prevSpeed !== null) {
-        cleaned[i].speed = prevSpeed;
-      } else if (nextSpeed !== null) {
-        cleaned[i].speed = nextSpeed;
-      }
-      // If still null, leave as null — fallback UI will handle it
-    }
-  }
-
-  return cleaned;
-}
-
-// Sub-components
-
-/** Single stat tile — shows label + value, with optional warning colour. */
-function StatCard({ label, value, unit, warn = false }) {
-  const displayValue = value !== null && value !== undefined
-    ? `${typeof value === "number" ? value.toFixed(1) : value}${unit}`
-    : "N/A";
-
+function ScrubTooltip({ active }) {
+  if (!active) return null;
   return (
-    <div style={{
-      ...styles.card,
-      borderColor: warn ? "#ff3b3b" : "#2a2a2a",
-      boxShadow: warn ? "0 0 12px rgba(255,59,59,0.35)" : "none",
-    }}>
-      <span style={styles.cardLabel}>{label}</span>
-      <span style={{ ...styles.cardValue, color: warn ? "#ff3b3b" : "#e8e8e8" }}>
-        {displayValue}
-      </span>
-      {warn && <span style={styles.warnBadge}>⚠ HIGH TEMP</span>}
+    <div style={styles.scrubberLine}>
+      <div style={styles.scrubberDot} />
     </div>
   );
 }
-
-/** Custom tooltip for the chart. */
-function ChartTooltip({ active, payload, label }) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div style={styles.tooltip}>
-      <p style={{ color: "#aaa", margin: 0, fontSize: 11 }}>
-        t+{Math.round((label - rawData[0].timestamp) / 1000)}s
-      </p>
-      <p style={{ color: "#00e5ff", margin: 0, fontWeight: 700 }}>
-        {payload[0].value?.toFixed(1)} km/h
-      </p>
-    </div>
-  );
-}
-
-// Main Component
 
 export default function TelemetryDashboard() {
   const data = useMemo(() => cleanTelemetry(rawData), []);
+  const [activeIndex, setActiveIndex] = useState(null);
 
-  // Most recent entry for the live readouts
-  const latest = data[data.length - 1];
+  const displayData = activeIndex !== null ? data[activeIndex] : data[data.length - 1];
 
-  const tempWarn = latest.motorTemp !== null && latest.motorTemp > 90;
+  const handleMouseMove = useCallback((state) => {
+    if (state.isTooltipActive && state.activeTooltipIndex !== undefined) {
+      setActiveIndex(state.activeTooltipIndex);
+    }
+  }, []);
+
+  const handleMouseLeave = useCallback(() => setActiveIndex(null), []);
+
+  const delta = (displayData.rawSpeedNum !== null && displayData.speed !== null) 
+    ? Math.abs(displayData.rawSpeedNum - displayData.speed).toFixed(2) 
+    : "N/A";
+
+  const isTempCritical = displayData.motorTemp !== null && displayData.motorTemp > 90;
 
   return (
-    <div style={styles.root}>
-      <header style={styles.header}>
-        <span style={styles.headerBrand}>SUNSWIFT</span>
-        <span style={styles.headerTitle}>TELEMETRY</span>
-        <span style={styles.headerSub}>30s SNAPSHOT</span>
-      </header>
+    <div style={styles.dashboardBackground}>
+      <div style={styles.hudWrapper}>
+        
+        {/* Brushed Metal Header */}
+        <div style={styles.header}>
+          <div style={styles.brandText}>SUNSWIFT // TELEMETRY // Q1 DASHBOARD</div>
+          <div style={styles.subText}>
+            GPS: {displayData.gps ? (
+              `${displayData.gps.lat.toFixed(4)}, ${displayData.gps.lng.toFixed(4)}`
+            ) : (
+              <span style={{ color: "#ef4444", fontWeight: "bold", letterSpacing: "0.15em" }}>SIGNAL LOST</span>
+            )}
+          </div>
+        </div>
 
-      {/* Live stat cards */}
-      <section style={styles.cardRow}>
-        <StatCard
-          label="SPEED"
-          value={latest.speed}
-          unit=" km/h"
-        />
-        <StatCard
-          label="BATTERY"
-          value={latest.battery}
-          unit="%"
-        />
-        <StatCard
-          label="MOTOR TEMP"
-          value={latest.motorTemp}
-          unit=" °C"
-          warn={tempWarn}
-        />
-      </section>
+        {/* Instruments Row */}
+        <div style={styles.dialsRow}>
+          <PrecisionGauge 
+            value={displayData.battery} max={100} 
+            ticks={[0, 20, 40, 60, 80, 100]}
+            label="BATTERY" unit="%" color="#03ff96" size={240}
+          />
+          <PrecisionGauge 
+            value={displayData.speed} max={160} 
+            ticks={[0, 20, 40, 60, 80, 100, 120, 140, 160]}
+            label="SPEED" unit="KM/H" color="#ff7300" size={320} isCenter={true}
+          />
+          <PrecisionGauge 
+            value={displayData.motorTemp} max={120} 
+            ticks={[0, 30, 60, 90, 120]}
+            label="TEMP" unit="°C" color="#0099ff" size={240}
+            isAlert={isTempCritical}
+          />
+        </div>
 
-      {/* Speed / time chart */}
-      <section style={styles.chartSection}>
-        <p style={styles.chartLabel}>SPEED  ·  km/h  over  30 s</p>
-        <ResponsiveContainer width="100%" height={260}>
-          <LineChart data={data} margin={{ top: 8, right: 24, left: 0, bottom: 4 }}>
-            <CartesianGrid stroke="#1e1e1e" strokeDasharray="4 4" />
-            <XAxis
-              dataKey="timestamp"
-              tickFormatter={(t) => `${Math.round((t - data[0].timestamp) / 1000)}s`}
-              tick={{ fill: "#555", fontSize: 11, fontFamily: "monospace" }}
-              axisLine={{ stroke: "#2a2a2a" }}
-              tickLine={false}
-            />
-            <YAxis
-              domain={[60, 90]}
-              tick={{ fill: "#555", fontSize: 11, fontFamily: "monospace" }}
-              axisLine={false}
-              tickLine={false}
-              width={36}
-            />
-            <Tooltip content={<ChartTooltip />} />
-            <ReferenceLine y={80} stroke="#333" strokeDasharray="3 3" />
-            <Line
-              type="monotone"
-              dataKey="speed"
-              stroke="#00e5ff"
-              strokeWidth={2}
-              dot={false}
-              activeDot={{ r: 4, fill: "#00e5ff" }}
-            />
-          </LineChart>
-        </ResponsiveContainer>
-      </section>
+        {/* Audit Log & Alerts */}
+        <div style={styles.midSection}>
+          
+          {/* Left Side: Audit Log & Interpolation Warning */}
+          <div style={{ position: "relative" }}>
+            
+            {/* Smooth Fade-in Warning Pill (Absolute Positioned) */}
+            <div style={{
+              ...styles.warningPill,
+              opacity: parseFloat(delta) !== 0 ? 1 : 0,
+            }}>
+              !! DATA INTERPOLATED
+            </div>
 
-      {/* GPS fallback info */}
-      <section style={styles.gpsRow}>
-        <span style={styles.cardLabel}>GPS</span>
-        {latest.gps ? (
-          <span style={styles.gpsValue}>
-            {latest.gps.lat.toFixed(4)}, {latest.gps.lng.toFixed(4)}
-          </span>
-        ) : (
-          <span style={{ ...styles.gpsValue, color: "#555" }}>No fix</span>
-        )}
-      </section>
+            <div style={styles.auditLog}>
+              <div style={{ color: "#fff", marginBottom: "8px", fontWeight: "bold" }}>AUDIT LOG</div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>RAW_SPD:</span> <span style={{ color: "#a0c8ff" }}>{displayData.rawSpeedDisplay}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>INT_SPD:</span> <span style={{ color: "#fff" }}>{displayData.speed ? displayData.speed.toFixed(1) : "N/A"}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>DELTA:</span> <span style={{ color: parseFloat(delta) > 0 ? "#fbbf24" : "#8a939b" }}>{delta}</span>
+              </div>
+            </div>
+
+          </div>
+          
+          {/* Right Side: Critical Temp Banner */}
+          {isTempCritical && (
+            <div style={styles.alertBanner}>
+              !!! CRITICAL MOTOR TEMPERATURE EXCEEDED
+            </div>
+          )}
+          
+        </div>
+
+        {/* Timeline Chart */}
+        <div style={styles.chartWrapper}>
+          <div style={styles.chartHeader}>↑ Speed (km/h)</div>
+          <ResponsiveContainer width="100%" height={220}>
+            <ComposedChart 
+              data={data} 
+              onMouseMove={handleMouseMove}
+              onMouseLeave={handleMouseLeave}
+              margin={{ top: 10, right: 10, left: -20, bottom: 10 }}
+            >
+              <defs>
+                <linearGradient id="colorSpeed" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4}/>
+                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid stroke="#2a2d35" vertical={true} horizontal={true} />
+              <XAxis 
+                dataKey="timestamp" 
+                tickFormatter={(t) => `${Math.round((t - data[0].timestamp) / 1000)}`}
+                stroke="#5c636a" tick={{ fontSize: 12, fill: "#8a939b" }} tickLine={false} axisLine={false}
+              />
+              <YAxis 
+                domain={[60, 95]} 
+                allowDataOverflow={true} // Prevents the raw 300 data point from flattening the graph
+                ticks={[60, 70, 80, 90]}
+                stroke="#5c636a" tick={{ fontSize: 12, fill: "#8a939b" }} tickLine={false} axisLine={false}
+              />
+              <Tooltip cursor={{ stroke: 'rgba(255,255,255,0.1)', strokeWidth: 1 }} content={<ScrubTooltip />} />
+              
+              {/* The clean interpolated area chart */}
+              <Area 
+                type="monotone" dataKey="speed" 
+                stroke="#3b82f6" strokeWidth={3} fillOpacity={1} fill="url(#colorSpeed)" 
+                activeDot={{ r: 6, fill: "#fff", stroke: "#3b82f6", strokeWidth: 3 }}
+                animationDuration={0} 
+              />
+              
+              {/* Overlay raw data as discrete dots for auditing */}
+              <Line 
+                type="monotone" dataKey="rawSpeedNum" 
+                stroke="none" 
+                dot={{ r: 3, fill: "rgba(255,255,255,0.4)", strokeWidth: 0 }} 
+                activeDot={false}
+                isAnimationActive={false}
+              />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+
+      </div>
     </div>
   );
 }
 
-// Styles
+// --- Styles ---
 
 const styles = {
-  root: {
+  dashboardBackground: {
     minHeight: "100vh",
-    background: "#080808",
-    color: "#e8e8e8",
-    fontFamily: "'Courier New', Courier, monospace",
-    padding: "32px 24px",
-    maxWidth: 760,
-    margin: "0 auto",
+    backgroundColor: "#111216",
+    backgroundImage: `repeating-linear-gradient(45deg, #0d0e12 25%, transparent 25%, transparent 75%, #0d0e12 75%, #0d0e12), repeating-linear-gradient(45deg, #0d0e12 25%, #15161a 25%, #15161a 75%, #0d0e12 75%, #0d0e12)`,
+    backgroundPosition: `0 0, 8px 8px`,
+    backgroundSize: `16px 16px`,
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+    padding: "20px",
+  },
+  hudWrapper: {
+    width: "100%",
+    maxWidth: "1000px",
+    backgroundColor: "rgba(21, 22, 26, 0.85)", 
+    borderRadius: "12px",
+    padding: "40px",
+    border: "1px solid #2a2d35",
+    boxShadow: "0 25px 60px rgba(0,0,0,0.8)",
   },
   header: {
-    display: "flex",
-    alignItems: "baseline",
-    gap: 12,
-    marginBottom: 32,
-    borderBottom: "1px solid #1e1e1e",
-    paddingBottom: 16,
+    background: "linear-gradient(180deg, #d3d5d7 0%, #a8a9ad 20%, #8b8e91 50%, #686b6d 100%)",
+    padding: "16px",
+    textAlign: "center",
+    marginBottom: "50px",
+    borderRadius: "4px",
+    border: "1px solid #4a4f5c",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.8), 0 5px 15px rgba(0,0,0,0.5)",
   },
-  headerBrand: {
-    fontSize: 22,
-    fontWeight: 700,
-    letterSpacing: "0.18em",
-    color: "#00e5ff",
+  brandText: {
+    fontSize: "22px",
+    fontWeight: 800,
+    letterSpacing: "0.2em",
+    color: "#fff",
+    textShadow: "0 2px 4px rgba(0,0,0,0.6)",
   },
-  headerTitle: {
-    fontSize: 13,
-    letterSpacing: "0.25em",
-    color: "#666",
-  },
-  headerSub: {
-    marginLeft: "auto",
-    fontSize: 11,
-    color: "#333",
+  subText: {
+    fontSize: "11px",
+    fontFamily: "monospace",
+    color: "#e2e2e2",
+    marginTop: "4px",
     letterSpacing: "0.1em",
+    textShadow: "0 1px 2px rgba(0,0,0,0.6)",
   },
-  cardRow: {
-    display: "grid",
-    gridTemplateColumns: "repeat(3, 1fr)",
-    gap: 16,
-    marginBottom: 32,
-  },
-  card: {
-    background: "#0f0f0f",
-    border: "1px solid #2a2a2a",
-    borderRadius: 4,
-    padding: "20px 16px",
+  dialsRow: {
     display: "flex",
-    flexDirection: "column",
-    gap: 8,
-    transition: "border-color 0.2s, box-shadow 0.2s",
-  },
-  cardLabel: {
-    fontSize: 10,
-    letterSpacing: "0.2em",
-    color: "#555",
-  },
-  cardValue: {
-    fontSize: 32,
-    fontWeight: 700,
-    lineHeight: 1,
-  },
-  warnBadge: {
-    fontSize: 10,
-    color: "#ff3b3b",
-    letterSpacing: "0.12em",
-    marginTop: 4,
-  },
-  chartSection: {
-    background: "#0f0f0f",
-    border: "1px solid #1e1e1e",
-    borderRadius: 4,
-    padding: "20px 16px 16px",
-    marginBottom: 16,
-  },
-  chartLabel: {
-    fontSize: 10,
-    letterSpacing: "0.2em",
-    color: "#444",
-    marginBottom: 12,
-    marginTop: 0,
-  },
-  tooltip: {
-    background: "#111",
-    border: "1px solid #2a2a2a",
-    borderRadius: 3,
-    padding: "8px 12px",
-  },
-  gpsRow: {
-    display: "flex",
+    justifyContent: "center",
     alignItems: "center",
-    gap: 16,
-    padding: "12px 16px",
-    background: "#0f0f0f",
-    border: "1px solid #1e1e1e",
-    borderRadius: 4,
+    gap: "35px", 
+    marginBottom: "30px",
   },
-  gpsValue: {
-    fontSize: 13,
-    color: "#888",
-    letterSpacing: "0.05em",
+  midSection: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "0 20px",
+    marginBottom: "30px",
+    minHeight: "85px",
+  },
+  auditLog: {
+    backgroundColor: "rgba(20, 21, 26, 0.95)",
+    border: "1px solid #4a4f5c",
+    padding: "12px 16px",
+    borderRadius: "4px",
+    fontFamily: "monospace",
+    fontSize: "12px",
+    color: "#8a939b",
+    lineHeight: "1.6",
+    minWidth: "220px",
+    boxShadow: "0 10px 20px rgba(0,0,0,0.4)",
+  },
+  alertBanner: {
+    backgroundColor: "rgba(239, 68, 68, 0.15)",
+    border: "1px solid #ef4444",
+    color: "#ef4444",
+    padding: "16px 24px",
+    borderRadius: "4px",
+    fontWeight: "bold",
+    letterSpacing: "0.1em",
+    fontSize: "14px",
+  },
+  chartWrapper: {
+    backgroundColor: "#111216",
+    padding: "16px",
+    borderRadius: "8px",
+    border: "1px solid #2a2d35",
+  },
+  chartHeader: {
+    color: "#fff",
+    fontSize: "12px",
+    marginBottom: "10px",
+    marginLeft: "10px",
+  },
+  scrubberLine: {
+    height: "100%",
+    position: "relative",
+  },
+  scrubberDot: {
+    position: "absolute",
+    top: -6,
+    left: -6,
+    width: 12,
+    height: 12,
+    backgroundColor: "#ffffff",
+    borderRadius: "50%",
+    boxShadow: "0 0 12px #3b82f6",
+  },
+  warningPill: {
+    position: "absolute",
+    bottom: "100%",                           // Pins it exactly to the top of the Audit Log
+    left: 0,
+    marginBottom: "10px",                     // Creates the gap
+    width: "100%",                            // Matches the Audit Log width perfectly
+    boxSizing: "border-box",
+    backgroundColor: "rgba(251, 191, 36, 0.15)",
+    border: "1px solid #fbbf24",                 
+    color: "#fbbf24",                            
+    padding: "6px 12px",
+    borderRadius: "4px",
+    fontSize: "11px",
+    fontWeight: 700,
+    letterSpacing: "0.1em",
+    textAlign: "center",
+    transition: "opacity 0.2s ease-in-out",   // The smooth fade effect
+    pointerEvents: "none",                    // Prevents it from blocking mouse clicks when hidden
   },
 };
