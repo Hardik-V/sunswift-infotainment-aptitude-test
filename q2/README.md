@@ -1,5 +1,7 @@
 To run
 
+`npm install`
+
 `node server.js`
 
 To POST use:
@@ -10,6 +12,8 @@ curl -X POST http://localhost:3001/logs/upload \
 ```
 To GET Use:
 
-`curl http://localhost:3001/logs/summary`
+```
+curl http://localhost:3001/logs/summary 
+```
 
 Or Postman as per preference.

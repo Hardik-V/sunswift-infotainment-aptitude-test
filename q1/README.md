@@ -1,1 +1,3 @@
-- `npm run dev` to run the dashboard on port 5173
+`npm install` then
+
+`npm run dev` to run the dashboard on port 5173
