@@ -68,7 +68,7 @@ export default function TelemetryDashboard() {
         
         {/* Main Header with GPS Readout */}
         <div style={styles.header}>
-          <div style={styles.brandText}>SUNSWIFT // TELEMETRY // Q1 DASHBOARD</div>
+          <div style={styles.brandText}>SUNSWIFT // INFOTAINMENT // Q1 DASHBOARD</div>
           <div style={styles.subText}>
             GPS: {displayData.gps ? (
               `${displayData.gps.lat.toFixed(4)}, ${displayData.gps.lng.toFixed(4)}`
